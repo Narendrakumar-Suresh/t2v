@@ -9,14 +9,14 @@ class ModelC(VideoGenBase):
 
     def build_long_ctx(self, dim, n_layers, n_heads, dropout):
         return nn.Sequential(*[
-            Mamba2Block(dim=dim, state_dim=64, conv_width=4, expand=2)
+            Mamba2Block(dim=dim, state_dim=128, conv_width=4, expand=4)
             for _ in range(n_layers)
         ])
 
     def build_short_ctx(self, dim, n_layers, n_heads, dropout):
         # smaller state_dim — short context needs less memory
         return nn.Sequential(*[
-            Mamba2Block(dim=dim, state_dim=32, conv_width=4, expand=2)
+            Mamba2Block(dim=dim, state_dim=64, conv_width=4, expand=4)
             for _ in range(n_layers // 2)
         ])
 

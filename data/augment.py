@@ -28,7 +28,7 @@ load_dotenv()
 SAVE_DIR = "./latent_shards"
 HF_TOKEN = os.environ.get("HF_TOKEN")
 HF_REPO = "entropyspace/openvid-latents"  # ← NEW repo
-SHARD_SIZE = 500
+SHARD_SIZE = 2000
 
 os.makedirs(SAVE_DIR, exist_ok=True)
 

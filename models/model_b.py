@@ -11,7 +11,7 @@ class ModelB(VideoGenBase):
     def build_long_ctx(self, dim, n_layers, n_heads, dropout):
         # Mamba2 for long range temporal
         return nn.Sequential(*[
-            Mamba2Block(dim=dim, state_dim=64, conv_width=4, expand=2)
+            Mamba2Block(dim=dim, state_dim=128, conv_width=4, expand=2)
             for _ in range(n_layers)
         ])
 

@@ -125,24 +125,23 @@ class VideoLatentDataset(IterableDataset):
             "token_mask": token_mask,  # [max_text_len] for masked pooling
             "x0":         x0,          # [C, H, W] target — full frame
         }
-        
-        
-        def get_dataloader(use_merged=False, batch_size=32, num_workers=4):
-            ds = VideoLatentDataset(use_merged=use_merged)
-            return DataLoader(ds, batch_size=batch_size,
-                              num_workers=num_workers, pin_memory=True)
-        
-        
-        if __name__ == "__main__":
-            print("Testing dataloader...")
-            ds    = VideoLatentDataset(use_merged=False)
-            batch = next(iter(ds))
-            print(f"latents:    {batch['latents'].shape}")    # [C, 15, H, W]
-            print(f"tokens:     {batch['tokens'].shape}")     # [128]
-            print(f"token_mask: {batch['token_mask'].shape}") # [128]
-            print(f"x0:         {batch['x0'].shape}")         # [C, H, W]
-            C, H, W = batch['x0'].shape
-            assert batch['x0'].shape == (C, H, W), f"x0 wrong shape: {batch['x0'].shape}"
-            assert batch['latents'].shape[1] == MAX_T - 1
-            print("✅ Dataloader works — past ≠ target confirmed!")
-        
+
+
+def get_dataloader(use_merged=False, batch_size=32, num_workers=4):
+    ds = VideoLatentDataset(use_merged=use_merged)
+    return DataLoader(ds, batch_size=batch_size,
+                      num_workers=num_workers, pin_memory=True)
+
+
+if __name__ == "__main__":
+    print("Testing dataloader...")
+    ds    = VideoLatentDataset(use_merged=False)
+    batch = next(iter(ds))
+    print(f"latents:    {batch['latents'].shape}")    # [C, 15, H, W]
+    print(f"tokens:     {batch['tokens'].shape}")     # [128]
+    print(f"token_mask: {batch['token_mask'].shape}") # [128]
+    print(f"x0:         {batch['x0'].shape}")         # [C, H, W]
+    C, H, W = batch['x0'].shape
+    assert batch['x0'].shape == (C, H, W), f"x0 wrong shape: {batch['x0'].shape}"
+    assert batch['latents'].shape[1] == MAX_T - 1
+    print("✅ Dataloader works — past ≠ target confirmed!")

@@ -13,7 +13,9 @@ from torch.utils.data import IterableDataset, DataLoader
 from datasets import load_dataset
 from transformers import AutoTokenizer
 
-TOKENIZER_ID = "google/flan-t5-base"  # vocab_size = 32128
+TOKENIZER_ID = "google/flan-t5-base"   # vocab_size = 32128
+MAX_T        = 30                       # max temporal frames
+                                        # 5s @ 24fps after 4x compression
 
 
 class VideoLatentDataset(IterableDataset):
@@ -28,25 +30,21 @@ class VideoLatentDataset(IterableDataset):
         self.max_text_len = max_text_len
         self.tokenizer    = AutoTokenizer.from_pretrained(TOKENIZER_ID)
 
-        # verify vocab size matches model
-        assert self.tokenizer.vocab_size <= 32128, \
-            f"Tokenizer vocab {self.tokenizer.vocab_size} > model vocab 32128"
-
     def tokenize(self, caption: str) -> torch.Tensor:
         out = self.tokenizer(
             caption,
-            max_length=self.max_text_len,
-            padding="max_length",
-            truncation=True,
-            return_tensors="pt",
+            max_length    = self.max_text_len,
+            padding       = "max_length",
+            truncation    = True,
+            return_tensors= "pt",
         )
-        return out["input_ids"].squeeze(0)   # [max_text_len]
+        return out["input_ids"].squeeze(0)      # [max_text_len]
 
     def deserialize(self, raw: bytes) -> torch.Tensor:
         return torch.load(
             io.BytesIO(raw),
-            weights_only=True,
-            map_location="cpu",
+            weights_only = True,
+            map_location = "cpu",
         )
 
     def __iter__(self):
@@ -59,8 +57,8 @@ class VideoLatentDataset(IterableDataset):
         """Load from entropyspace/openvid-latents (after augment.py runs)"""
         ds = load_dataset(
             "entropyspace/openvid-latents",
-            split="train",
-            streaming=True,
+            split     = "train",
+            streaming = True,
         )
         for row in ds:
             latent = self.deserialize(row["serialized_latent"])
@@ -68,18 +66,18 @@ class VideoLatentDataset(IterableDataset):
             yield self._make_sample(latent, tokens)
 
     def _iter_streaming(self):
-        """Stream from fal + joekraper directly (before augment.py runs)"""
+        """Stream from fal + joekraper (before augment.py runs)"""
         filter_ds   = load_dataset(
             "joekraper/openvid-filtered-5to10s",
-            split="train+test",
+            split = "train+test",
         )
         caption_map = {row["video"]: row["caption"] for row in filter_ds}
         video_set   = set(caption_map.keys())
 
         cosmos_ds = load_dataset(
             "fal/cosmos-openvid-1m",
-            split="train",
-            streaming=True,
+            split     = "train",
+            streaming = True,
         )
         for row in cosmos_ds:
             if row["video"] not in video_set:
@@ -88,24 +86,38 @@ class VideoLatentDataset(IterableDataset):
             tokens = self.tokenize(caption_map[row["video"]])
             yield self._make_sample(latent, tokens)
 
-    def _make_sample(self, latent: torch.Tensor, tokens: torch.Tensor) -> dict:
+    def _make_sample(
+        self,
+        latent: torch.Tensor,
+        tokens: torch.Tensor,
+    ) -> dict:
         """
-        latent: [C, T, H, W]  — from Cosmos tokenizer
+        latent: [C, T, H, W]  raw from Cosmos tokenizer
 
+        Fixes T dimension to MAX_T so DataLoader can stack batches.
         Returns:
-          latents: [C, T, H, W]  full latent (past context for backbone)
-          tokens:  [max_text_len] tokenized caption
-          x0:      [C]            CLEAN latent summary (no noise added here)
-          ← noise is added in train.py via get_noisy_pair()
+          latents [C, MAX_T, H, W]  — past context for backbone
+          tokens  [max_text_len]    — tokenized caption
+          x0      [C]               — CLEAN latent (no noise)
         """
-        # clean x0 = mean over spatial-temporal dims
-        # [C, T, H, W] → [C]
-        x0 = latent.float().mean(dim=(1, 2, 3))
+        latent = latent.float()
+        C, T, H, W = latent.shape
+
+        # ── Fix T dimension ───────────────────────────────────────────
+        if T > MAX_T:
+            latent = latent[:, :MAX_T, :, :]
+        elif T < MAX_T:
+            pad    = torch.zeros(C, MAX_T - T, H, W, dtype=latent.dtype)
+            latent = torch.cat([latent, pad], dim=1)
+        # latent is now [C, MAX_T, H, W]
+
+        # clean x0 = mean over spatial+temporal dims [C, T, H, W] → [C]
+        x0 = latent.mean(dim=(1, 2, 3))
 
         return {
-            "latents": latent.float(),   # [C, T, H, W]
-            "tokens":  tokens,           # [max_text_len]
-            "x0":      x0,               # [C] ← CLEAN, no noise
+            "latents": latent,   # [C, MAX_T, H, W]
+            "tokens":  tokens,   # [max_text_len]
+            "x0":      x0,       # [C]  ← CLEAN, noise added in train.py
         }
 
 
@@ -128,9 +140,15 @@ if __name__ == "__main__":
     ds    = VideoLatentDataset(use_merged=False)
     batch = next(iter(ds))
 
-    print(f"latents: {batch['latents'].shape}")   # [C, T, H, W]
-    print(f"tokens:  {batch['tokens'].shape}")    # [max_text_len]
-    print(f"x0:      {batch['x0'].shape}")        # [C]
-    assert batch['x0'].shape == (16,), \
-        f"Expected x0 shape (16,) got {batch['x0'].shape}"
+    print(f"latents: {batch['latents'].shape}")   # [16, 30, H, W]
+    print(f"tokens:  {batch['tokens'].shape}")    # [128]
+    print(f"x0:      {batch['x0'].shape}")        # [16]
+
+    assert batch["latents"].shape[1] == MAX_T, \
+        f"T dimension should be {MAX_T}, got {batch['latents'].shape[1]}"
+    assert batch["x0"].shape == (16,), \
+        f"x0 should be (16,), got {batch['x0'].shape}"
+    assert batch["tokens"].shape == (128,), \
+        f"tokens should be (128,), got {batch['tokens'].shape}"
+
     print("✅ Dataloader works!")

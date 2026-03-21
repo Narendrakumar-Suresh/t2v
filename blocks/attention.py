@@ -8,20 +8,20 @@ class Attention(nn.Module):
     def __init__(self, dim: int, n_heads: int, dropout: float = 0.0):
         super().__init__()
         assert dim % n_heads == 0
-        self.n_heads  = n_heads
+        self.n_heads = n_heads
         self.head_dim = dim // n_heads
-        self.dropout  = dropout
+        self.dropout = dropout
 
-        self.wq   = nn.Linear(dim, dim, bias=False)
-        self.wk   = nn.Linear(dim, dim, bias=False)
-        self.wv   = nn.Linear(dim, dim, bias=False)
+        self.wq = nn.Linear(dim, dim, bias=False)
+        self.wk = nn.Linear(dim, dim, bias=False)
+        self.wv = nn.Linear(dim, dim, bias=False)
         self.proj = nn.Linear(dim, dim, bias=False)
 
         self.rope = RoPE(dim=self.head_dim)
 
     def forward(self, x, mask=None):
         B, N, D = x.shape
-        H, hd   = self.n_heads, self.head_dim
+        H, hd = self.n_heads, self.head_dim
 
         # project → [B, N, H, hd]
         q = self.wq(x).reshape(B, N, H, hd)
@@ -39,7 +39,9 @@ class Attention(nn.Module):
 
         # FlashAttention on MI300X automatically
         out = F.scaled_dot_product_attention(
-            q, k, v,
+            q,
+            k,
+            v,
             attn_mask=mask,
             dropout_p=self.dropout if self.training else 0.0,
         )
@@ -49,9 +51,9 @@ class Attention(nn.Module):
 
 
 if __name__ == "__main__":
-    x    = torch.randn(2, 1024, 512)
+    x = torch.randn(2, 1024, 512)
     attn = Attention(dim=512, n_heads=8)
-    out  = attn(x)
+    out = attn(x)
     print(f"out: {out.shape}")
     assert out.shape == x.shape
     print("✅")

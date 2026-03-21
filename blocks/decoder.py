@@ -19,9 +19,9 @@ class DecoderBlock(nn.Module):
     def __init__(self, dim: int, n_heads: int, hidden_dim: int, dropout: float = 0.0):
         super().__init__()
         self.norm1 = nn.RMSNorm(dim)
-        self.attn  = Attention(dim, n_heads, dropout)
+        self.attn = Attention(dim, n_heads, dropout)
         self.norm2 = nn.RMSNorm(dim)
-        self.ffn   = SwiGLU(dim, hidden_dim)
+        self.ffn = SwiGLU(dim, hidden_dim)
 
     def forward(self, x, mask=None):
         # prenorm + attention + residual
@@ -33,8 +33,8 @@ class DecoderBlock(nn.Module):
 
 if __name__ == "__main__":
     block = DecoderBlock(dim=512, n_heads=8, hidden_dim=2048)
-    x     = torch.randn(2, 1024, 512)
-    out   = block(x)
+    x = torch.randn(2, 1024, 512)
+    out = block(x)
     print(f"out: {out.shape}")
     assert out.shape == x.shape
     print("✅")

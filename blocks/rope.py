@@ -19,8 +19,8 @@ class RoPE(nn.Module):
 
         # cache
         self.seq_len_cached = None
-        self.cos_cached     = None
-        self.sin_cached     = None
+        self.cos_cached = None
+        self.sin_cached = None
 
     def forward(self, seq_len: int, device: torch.device):
         # recompute only if seq_len changed
@@ -49,8 +49,8 @@ def rotate_half(x: torch.Tensor) -> torch.Tensor:
     [x1, x2] → [-x2, x1]
     This implements the 2D rotation matrix.
     """
-    x1 = x[..., : x.shape[-1] // 2]   # first half
-    x2 = x[..., x.shape[-1] // 2 :]   # second half
+    x1 = x[..., : x.shape[-1] // 2]  # first half
+    x2 = x[..., x.shape[-1] // 2 :]  # second half
     return torch.cat([-x2, x1], dim=-1)
 
 
@@ -82,7 +82,7 @@ if __name__ == "__main__":
     B, N, H, hd = 2, 1024, 8, 64
     dim = H * hd  # 512
 
-    rope = RoPE(dim=hd)   # per-head dim
+    rope = RoPE(dim=hd)  # per-head dim
     cos, sin = rope(seq_len=N, device=torch.device("cpu"))
 
     q = torch.randn(B, N, H, hd)

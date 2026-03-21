@@ -27,9 +27,9 @@ os.environ["GPU_MAX_HW_QUEUES"]           = "2"
 # ── Config ────────────────────────────────────────────────────────────
 class Config:
     # model
-    dim         = 512
-    n_layers    = 12
-    n_heads     = 8
+    dim         =  1024
+    n_layers    = 24
+    n_heads     = 16
     latent_ch   = 16
     patch_size  = 4
     short_k     = 64

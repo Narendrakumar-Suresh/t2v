@@ -24,7 +24,7 @@ if __name__ == "__main__":
     import torch
     model   = ModelA(dim=64, n_layers=2, n_heads=4)
     latents = torch.randn(2, 16, 4, 32, 32)
-    tokens  = torch.randint(0, 32000, (2, 32))
+    tokens  = torch.randint(0, 32128, (2, 32))
     x_noisy = torch.randn(2, 16)
     t       = torch.rand(2, 1)
     out     = model(latents, tokens, x_noisy, t)

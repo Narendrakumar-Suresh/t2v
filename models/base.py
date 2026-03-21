@@ -65,7 +65,7 @@ class VideoGenBase(nn.Module):
     """
     def __init__(
         self,
-        dim: int             = 896,    # ← 896 gives ~500M params
+        dim: int             = 512,    # ← 896 gives ~500M params
         n_layers: int        = 24,
         n_heads: int         = 16,
         latent_channels: int = 16,

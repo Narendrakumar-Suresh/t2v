@@ -26,21 +26,14 @@ class RoPE(nn.Module):
         # recompute only if seq_len changed
         if seq_len != self.seq_len_cached:
             self.seq_len_cached = seq_len
-
-            # positions [0, 1, 2, ..., seq_len-1]
             t = torch.arange(seq_len, device=device).float()
-
-            # outer product: [seq_len, dim//2]
             freqs = torch.outer(t, self.inv_freq)
-
-            # duplicate: [seq_len, dim]
             emb = torch.cat([freqs, freqs], dim=-1)
-
-            # cache with extra dims for broadcasting [seq_len, 1, 1, dim]
             self.cos_cached = emb.cos()[None, :, None, :]  # [1, N, 1, dim]
             self.sin_cached = emb.sin()[None, :, None, :]  # [1, N, 1, dim]
 
-        return self.cos_cached, self.sin_cached
+        # Ensure cached tensors are on the correct device
+        return self.cos_cached.to(device), self.sin_cached.to(device)
 
 
 def rotate_half(x: torch.Tensor) -> torch.Tensor:

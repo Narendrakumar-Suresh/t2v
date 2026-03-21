@@ -48,6 +48,9 @@ class Mamba2Block(nn.Module):
 
         # dt (discretization step) projection
         self.dt_proj = nn.Linear(self.inner_dim, self.inner_dim, bias=True)
+        # stable dt init: small values initially
+        nn.init.constant_(self.dt_proj.bias, -3.0)
+        nn.init.zeros_(self.dt_proj.weight)
 
         # output projection
         self.out_proj = nn.Linear(self.inner_dim, dim, bias=False)

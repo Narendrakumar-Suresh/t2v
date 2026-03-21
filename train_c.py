@@ -1,12 +1,8 @@
 """
-train_c.py — Model C: Mamba2 + Mamba2
-========================================
-501M params | dim=576 | 26 layers | state_dim=128 | expand=4
-~4.1hrs on MI300X | ~$8
-
-Usage:
-  python train_c.py
-  python train_c.py --smoke
+train_c.py — Model C: Mamba2 + Mamba2 — FIXED
+================================================
+501M | dim=576 | 26 layers | state_dim=128 | expand=4
+~4.1hrs MI300X | ~$8
 """
 
 import os, math, argparse
@@ -24,22 +20,18 @@ os.environ["HIP_FORCE_DEV_KERNARG"]       = "1"
 os.environ["GPU_MAX_HW_QUEUES"]           = "2"
 
 
-# ── Config — tuned for ~500M ──────────────────────────────────────────
 class Config:
-    model_type  = "c"
-    dim         = 576    # ← tuned for 500M
-    n_layers    = 26     # ← tuned for 500M
-    n_heads     = 9      # head_dim = 576/9 = 64
-    state_dim   = 128    # Mamba2 state
-    expand      = 4      # ← larger expand to hit 500M
-    latent_ch   = 16
-    patch_size  = 4
-    short_k     = 64
-    head_layers = 8
-    noise_std   = 0.1
-    dropout     = 0.0
-    vocab_size  = 32128
-
+    model_type   = "c"
+    dim          = 576
+    n_layers     = 26
+    n_heads      = 9
+    latent_ch    = 16
+    patch_size   = 4
+    short_k      = 64
+    head_layers  = 8
+    noise_std    = 0.1
+    dropout      = 0.0
+    vocab_size   = 32128
     batch_size   = 32
     lr           = 3e-4
     weight_decay = 0.1
@@ -51,6 +43,7 @@ class Config:
     use_merged   = True
     max_text_len = 128
     num_workers  = 4
+    recon_weight = 0.5
     HF_TOKEN     = os.environ.get("HF_TOKEN")
 
 
@@ -64,25 +57,36 @@ def get_model(cfg):
         vocab_size=cfg.vocab_size,
     )
 
-def consistency_loss(p1, p2): return F.mse_loss(p1, p2.detach())
 
 def get_noisy_pair(x0):
-    t1 = torch.rand(x0.shape[0], 1, device=x0.device)
-    t2 = (t1 + 0.05).clamp(0, 1)
-    return x0+torch.randn_like(x0)*t1, x0+torch.randn_like(x0)*t2, t1, t2
+    t1   = torch.rand(x0.shape[0], 1, device=x0.device)
+    t2   = (t1 + 0.05).clamp(0.0, 1.0)
+    return x0 + torch.randn_like(x0)*t1.view(-1,1,1,1), x0 + torch.randn_like(x0)*t2.view(-1,1,1,1), t1, t2
+
+
+def compute_loss(model, latents, tokens, token_mask, x0, cfg):
+    x_t1, x_t2, t1, t2 = get_noisy_pair(x0)
+    pred_1 = model(latents, tokens, x_t1, t1, token_mask)
+    pred_2 = model(latents, tokens, x_t2, t2, token_mask)
+    loss_cons  = F.mse_loss(pred_2, pred_1.detach())
+    loss_recon = F.mse_loss(pred_1, x0)
+    return loss_cons + cfg.recon_weight * loss_recon, loss_cons, loss_recon
+
 
 def get_lr(step, cfg):
     if step < cfg.warmup_steps:
         return cfg.lr * step / max(1, cfg.warmup_steps)
-    p = (step-cfg.warmup_steps) / max(1, cfg.max_steps-cfg.warmup_steps)
+    p = (step - cfg.warmup_steps) / max(1, cfg.max_steps - cfg.warmup_steps)
     return cfg.lr * 0.5 * (1.0 + math.cos(math.pi * p))
 
+
 def save_checkpoint(model, step, cfg):
-    d = f"./checkpoints/model_{cfg.model_type}"
+    d    = f"./checkpoints/model_{cfg.model_type}"
     os.makedirs(d, exist_ok=True)
     path = f"{d}/step_{step:07d}.safetensors"
-    s = model._orig_mod.state_dict() if hasattr(model,"_orig_mod") else model.state_dict()
-    save_file({k: v.cpu() for k,v in s.items()}, path)
+    s    = model._orig_mod.state_dict() if hasattr(model, "_orig_mod") \
+           else model.state_dict()
+    save_file({k: v.cpu() for k, v in s.items()}, path)
     print(f"  ✓ {path}")
     if cfg.HF_TOKEN:
         api = HfApi(token=cfg.HF_TOKEN)
@@ -91,7 +95,8 @@ def save_checkpoint(model, step, cfg):
         api.upload_file(path_or_fileobj=path,
                         path_in_repo=f"step_{step:07d}.safetensors",
                         repo_id=rid, repo_type="model")
-        print(f"  ✓ uploaded → {rid}")
+        print(f"  ✓ → {rid}")
+
 
 def train():
     cfg       = Config()
@@ -100,7 +105,8 @@ def train():
                 else torch.device("cpu")
 
     model = get_model(cfg).to(device)
-    if use_accel: model = torch.compile(model)
+    if use_accel:
+        model = torch.compile(model)
     n_p = sum(p.numel() for p in model.parameters())
 
     print("=" * 55)
@@ -110,57 +116,65 @@ def train():
     print("=" * 55)
 
     optimizer = torch.optim.AdamW(model.parameters(),
-                    lr=cfg.lr, weight_decay=cfg.weight_decay, betas=(0.9,0.95))
+                  lr=cfg.lr, weight_decay=cfg.weight_decay, betas=(0.9, 0.95))
     from data.dataloader import VideoLatentDataset
-    loader = DataLoader(VideoLatentDataset(use_merged=cfg.use_merged,
-                                           max_text_len=cfg.max_text_len),
-                        batch_size=cfg.batch_size, num_workers=cfg.num_workers,
-                        pin_memory=use_accel, persistent_workers=cfg.num_workers>0)
+    loader = DataLoader(
+        VideoLatentDataset(use_merged=cfg.use_merged, max_text_len=cfg.max_text_len),
+        batch_size=cfg.batch_size, num_workers=cfg.num_workers,
+        pin_memory=use_accel, persistent_workers=cfg.num_workers > 0,
+    )
 
     model.train()
     step, total_loss = 0, 0.0
+
     while step < cfg.max_steps:
         for batch in loader:
             if step >= cfg.max_steps: break
-            latents = batch["latents"].to(device)
-            tokens  = batch["tokens"].to(device)
-            x0      = batch["x0"].to(device)
-            x_t1,x_t2,t1,t2 = get_noisy_pair(x0)
+            latents    = batch["latents"].to(device)
+            tokens     = batch["tokens"].to(device)
+            token_mask = batch["token_mask"].to(device)
+            x0         = batch["x0"].to(device)
             lr = get_lr(step, cfg)
             for g in optimizer.param_groups: g["lr"] = lr
             optimizer.zero_grad()
-            loss = consistency_loss(model(latents,tokens,x_t1,t1),
-                                    model(latents,tokens,x_t2,t2))
+            loss, lc, lr_ = compute_loss(model, latents, tokens, token_mask, x0, cfg)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
             optimizer.step()
             total_loss += loss.item()
             step += 1
             if step % cfg.log_every == 0:
-                avg = total_loss/cfg.log_every; total_loss = 0.0
+                avg = total_loss / cfg.log_every; total_loss = 0.0
                 mem = torch.cuda.memory_allocated()/1e9 if use_accel else 0.0
-                print(f"step {step:>7,} | loss {avg:.5f} | lr {lr:.2e} | mem {mem:.1f}GB")
+                print(f"step {step:>7,} | loss {avg:.5f} "
+                      f"| cons {lc:.4f} | recon {lr_:.4f} "
+                      f"| lr {lr:.2e} | mem {mem:.1f}GB")
             if step % cfg.save_every == 0:
                 save_checkpoint(model, step, cfg)
+
     save_checkpoint(model, step, cfg)
     print(f"\n✅ Done — {step:,} steps")
+
 
 def smoke_test():
     class C:
         model_type="c"; dim=64; n_layers=2; n_heads=4; latent_ch=16
         patch_size=4; short_k=8; head_layers=2; noise_std=0.1
-        dropout=0.0; vocab_size=32128
+        dropout=0.0; vocab_size=32128; recon_weight=0.5
     cfg = C()
     model = get_model(cfg)
-    x0 = torch.randn(2,16)
-    x_t1,x_t2,t1,t2 = get_noisy_pair(x0)
+    B, C, H, W = 2, 16, 16, 16
+    latents    = torch.randn(B, C, 15, H, W)
+    tokens     = torch.randint(0, 32128, (B, 32))
+    token_mask = torch.ones(B, 32, dtype=torch.long)
+    x0         = torch.randn(B, C, H, W)
     opt = torch.optim.AdamW(model.parameters())
     opt.zero_grad()
-    loss = consistency_loss(
-        model(torch.randn(2,16,4,16,16), torch.randint(0,32128,(2,32)), x_t1, t1),
-        model(torch.randn(2,16,4,16,16), torch.randint(0,32128,(2,32)), x_t2, t2))
+    loss, lc, lr_ = compute_loss(model, latents, tokens, token_mask, x0, cfg)
     loss.backward(); opt.step()
-    print(f"✅ Model C smoke test passed | loss={loss.item():.5f}")
+    print(f"  loss={loss.item():.5f} cons={lc:.5f} recon={lr_:.5f}")
+    print(f"✅ Model C smoke test passed!")
+
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()

@@ -135,19 +135,22 @@ def save_checkpoint(model, step: int, model_type: str, cfg):
 
 # ── Training loop ─────────────────────────────────────────────────────
 def train(model_type: str):
-    cfg    = Config()
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    cfg = Config()
+
+    # ── generic accelerator (CUDA / ROCm / MPS / CPU) ─────────────────
+    use_accel = torch.accelerator.is_available()
+    device    = torch.accelerator.current_accelerator() \
+                if use_accel else torch.device("cpu")
 
     print("=" * 55)
     print(f"  Device:  {device}")
     print(f"  Model:   {model_type.upper()}")
-    if device.type == "cuda":
-        print(f"  GPU:     {torch.cuda.get_device_name(0)}")
-        print(f"  VRAM:    {torch.cuda.get_device_properties(0).total_memory/1e9:.1f}GB")
+    if use_accel:
+        print(f"  Accel:   {torch.accelerator.current_accelerator()}")
     print("=" * 55)
 
     model = get_model(model_type, cfg).to(device)
-    if device.type == "cuda":                  # ← only compile on GPU
+    if use_accel:                              # compile only with accelerator
         model = torch.compile(model)
     n_p = sum(p.numel() for p in model.parameters())
     print(f"  Params: {n_p/1e6:.1f}M\n")
@@ -162,8 +165,11 @@ def train(model_type: str):
         use_merged=cfg.use_merged, max_text_len=cfg.max_text_len
     )
     dataloader = DataLoader(
-        dataset, batch_size=cfg.batch_size,
-        num_workers=cfg.num_workers, pin_memory=True,
+        dataset,
+        batch_size       = cfg.batch_size,
+        num_workers      = cfg.num_workers,
+        pin_memory       = use_accel,          # only pin when using accelerator
+        persistent_workers = cfg.num_workers > 0,
     )
 
     model.train()
@@ -177,7 +183,7 @@ def train(model_type: str):
 
             latents = batch["latents"].to(device)   # [B, C, T, H, W]
             tokens  = batch["tokens"].to(device)    # [B, seq_len]
-            x0      = batch["x0"].to(device)        # [B, C] clean latent
+            x0      = batch["x0"].to(device)        # [B, C] clean
 
             x_t1, x_t2, t1, t2 = get_noisy_pair(x0)
 
@@ -199,9 +205,20 @@ def train(model_type: str):
             if step % cfg.log_every == 0:
                 avg        = total_loss / cfg.log_every
                 total_loss = 0.0
-                mem        = torch.cuda.memory_allocated()/1e9 \
-                             if device.type == "cuda" else 0.0
-                print(f"step {step:>7,} | loss {avg:.5f} | lr {lr:.2e} | mem {mem:.1f}GB")
+                # generic memory — works on CUDA and ROCm
+                if use_accel:
+                    try:
+                        mem = torch.cuda.memory_allocated() / 1e9
+                    except Exception:
+                        mem = 0.0
+                else:
+                    mem = 0.0
+                print(
+                    f"step {step:>7,} | "
+                    f"loss {avg:.5f} | "
+                    f"lr {lr:.2e} | "
+                    f"mem {mem:.1f}GB"
+                )
 
             if step % cfg.save_every == 0:
                 save_checkpoint(model, step, model_type, cfg)
@@ -214,7 +231,6 @@ def train(model_type: str):
 def smoke_test(model_type: str):
     print(f"\nSmoke test — Model {model_type.upper()} on CPU...")
 
-    # fresh tiny config — never mutates Config class
     class SmokeCfg:
         dim         = 64
         n_layers    = 2
@@ -228,7 +244,7 @@ def smoke_test(model_type: str):
         vocab_size  = 32128
 
     cfg    = SmokeCfg()
-    device = torch.device("cpu")
+    device = torch.device("cpu")           # always CPU for smoke test
     model  = get_model(model_type, cfg).to(device)
     # NO torch.compile on CPU
 

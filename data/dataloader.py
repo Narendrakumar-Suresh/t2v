@@ -17,6 +17,8 @@ TOKENIZER_ID = "google/flan-t5-base"
 MAX_T        = 16   # total frames (past + current)
                     # backbone sees MAX_T-1=15 past frames
                     # predicts 1 current frame
+H_LAT        = 32   # Cosmos DV4x8x8: 256px video -> 32 latent height
+W_LAT        = 32   # same for width
 
 
 class VideoLatentDataset(IterableDataset):
@@ -110,6 +112,30 @@ class VideoLatentDataset(IterableDataset):
         current = latent[:, -1, :, :]
         # past is everything before the last frame
         past = latent[:, :-1, :, :]
+
+        # ── Fix spatial to H_LAT x W_LAT ──────────────────────────────
+        # Crop if too large
+        if H > H_LAT:
+            past = past[:, :, :H_LAT, :]
+            current = current[:, :H_LAT, :]
+        if W > W_LAT:
+            past = past[:, :, :, :W_LAT]
+            current = current[:, :, :W_LAT]
+            
+        # Pad if too small
+        _, _, H_curr, W_curr = past.shape
+        if H_curr < H_LAT:
+            pad_p = torch.zeros(C, past.shape[1], H_LAT - H_curr, past.shape[3])
+            past = torch.cat([past, pad_p], dim=2)
+            pad_c = torch.zeros(C, H_LAT - H_curr, current.shape[2])
+            current = torch.cat([current, pad_c], dim=1)
+        
+        _, _, H_curr, W_curr = past.shape # refresh dimensions
+        if W_curr < W_LAT:
+            pad_p = torch.zeros(C, past.shape[1], past.shape[2], W_LAT - W_curr)
+            past = torch.cat([past, pad_p], dim=3)
+            pad_c = torch.zeros(C, current.shape[1], W_LAT - W_curr)
+            current = torch.cat([current, pad_c], dim=2)
 
         # ── Pad/trim past context to MAX_T-1 ──────────────────────────
         C_p, T_p, H_p, W_p = past.shape

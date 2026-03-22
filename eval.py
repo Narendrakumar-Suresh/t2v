@@ -89,26 +89,28 @@ def load_model(model_type: str, checkpoint_path: str, device):
 @torch.no_grad()
 def generate_latent(
     model,
-    latents: torch.Tensor,   # [B, C, T, H, W]
-    tokens:  torch.Tensor,   # [B, seq_len]
+    latents:    torch.Tensor,   # [B, C, T, H, W]
+    tokens:     torch.Tensor,   # [B, seq_len]
     device,
-    steps:   int = 4,
+    token_mask: torch.Tensor = None,
+    video_mask: torch.Tensor = None,
+    steps:      int = 4,
 ) -> torch.Tensor:
     """Pure noise → clean latent in `steps` consistency steps."""
-    B   = latents.shape[0]
-    C   = cfg.latent_ch
-    x   = torch.randn(B, C, device=device)
+    B, C, T, H, W = latents.shape
+    # x should be spatial [B, C, H, W] to match model expectation
+    x   = torch.randn(B, C, H, W, device=device)
     ts  = torch.linspace(1.0, 0.05, steps, device=device)
 
     for i, t_val in enumerate(ts):
         t   = torch.full((B, 1), t_val.item(), device=device)
-        x0  = model(latents, tokens, x, t)
+        x0  = model(latents, tokens, x, t, token_mask=token_mask, video_mask=video_mask)
         if i < len(ts) - 1:
             x = x0 + torch.randn_like(x0) * ts[i + 1].item()
         else:
             x = x0
 
-    return x0   # [B, C]
+    return x0   # [B, C, H, W]
 
 
 # ── Cosmos VAE decoder ────────────────────────────────────────────────
@@ -127,10 +129,12 @@ def get_decoder():
 
 def decode_latent(decoder, latent: torch.Tensor) -> np.ndarray:
     """latent [C,T,H,W] → frames [T,H,W,3] uint8"""
+    # ensure input is [B, C, T, H, W] for decoder
     v = decoder.decode(latent.unsqueeze(0)).squeeze(0)
     v = (v.float() + 1.0) / 2.0
     v = v.clamp(0, 1).cpu().numpy()
     v = (v * 255).astype(np.uint8)
+    # v is [C, T, H, W] -> [T, H, W, C]
     return v.transpose(1, 2, 3, 0)
 
 
@@ -200,12 +204,12 @@ def evaluate(model_type: str, checkpoint_path: str) -> dict:
     tokenizer = AutoTokenizer.from_pretrained("google/flan-t5-base")
     clip      = CLIPScorer(device)
 
-    ds = load_dataset("entropyspace/openvid-latents",
+    ds = load_dataset("joekraper/openvid-latents",
                       split="train", streaming=True)
 
     real_videos, gen_videos = [], []
     clip_scores             = []
-    b_lat, b_tok, b_cap, b_real = [], [], [], []
+    b_lat, b_tok, b_cap, b_real, b_tmask, b_vmask = [], [], [], [], [], []
     count = 0
 
     for row in tqdm(ds, total=cfg.n_samples):
@@ -214,37 +218,67 @@ def evaluate(model_type: str, checkpoint_path: str) -> dict:
 
         real_lat = torch.load(io.BytesIO(row["serialized_latent"]),
                               weights_only=True, map_location="cpu").float()
-        toks = tokenizer(row["caption"], max_length=cfg.max_text_len,
-                         padding="max_length", truncation=True,
-                         return_tensors="pt")["input_ids"].squeeze(0)
+        
+        # Tokenize with mask
+        token_out = tokenizer(row["caption"], max_length=cfg.max_text_len,
+                             padding="max_length", truncation=True,
+                             return_tensors="pt")
+        toks  = token_out["input_ids"].squeeze(0)
+        tmask = token_out["attention_mask"].squeeze(0)
 
         b_lat.append(real_lat)
         b_tok.append(toks)
+        b_tmask.append(tmask)
         b_cap.append(row["caption"])
         b_real.append(real_lat)
         count += 1
 
         if len(b_lat) == cfg.batch_size or count == cfg.n_samples:
             # pad T dimension for batching
-            MAX_T = 30
-            padded = []
+            MAX_T_EVAL = 16  # 15 past + 1 current
+            padded, vmasks = [], []
             for lat in b_lat:
                 C, T, H, W = lat.shape
-                if T > MAX_T:   lat = lat[:, :MAX_T]
-                elif T < MAX_T: lat = torch.cat([lat, torch.zeros(C,MAX_T-T,H,W)], 1)
-                padded.append(lat)
+                # past context is everything but the last frame (if we follow dataloader logic)
+                # But here lat is full video. generate_latent takes latents as past context.
+                # So we should pass first T-1 frames as past context.
+                past = lat[:, :-1, :, :]
+                C_p, T_p, H_p, W_p = past.shape
+                target_T = MAX_T_EVAL - 1
+                
+                if T_p > target_T:
+                    past = past[:, -target_T:, :, :]
+                    vmask = torch.ones(target_T)
+                else:
+                    pad = torch.zeros(C_p, target_T - T_p, H_p, W_p)
+                    past = torch.cat([pad, past], dim=1)
+                    vmask = torch.cat([torch.zeros(target_T - T_p), torch.ones(T_p)])
+                
+                padded.append(past)
+                vmasks.append(vmask)
 
-            lat_batch = torch.stack(padded).to(device)
+            # lat_batch must be scaled by 1/8.0 as it was during training
+            lat_batch = (torch.stack(padded) / 8.0).to(device)
             tok_batch = torch.stack(b_tok).to(device)
+            tm_batch  = torch.stack(b_tmask).to(device)
+            vm_batch  = torch.stack(vmasks).to(device)
 
-            gen_lats = generate_latent(model, lat_batch, tok_batch,
-                                       device, steps=cfg.inference_steps)
+            gen_lats = generate_latent(model, lat_batch, tok_batch, device,
+                                       token_mask=tm_batch, video_mask=vm_batch,
+                                       steps=cfg.inference_steps)
 
             if decoder is not None:
                 for i in range(len(b_lat)):
-                    real_i = b_real[i]
+                    real_i = b_real[i] # [C, T, H, W]
                     C, T, H, W = real_i.shape
-                    gen_i  = gen_lats[i].cpu().view(C,1,1,1).expand(C,T,H,W).contiguous()
+                    
+                    # ── Improve visualization: Past + Gen ─────────────────────
+                    # Past frames (raw range)
+                    past_frames_lat = real_i[:, :-1, :, :]
+                    # Generated frame (scaled back to raw range)
+                    gen_frame_lat = (gen_lats[i] * 8.0).cpu().unsqueeze(1) # [C, 1, H, W]
+                    # Full video latent
+                    gen_i = torch.cat([past_frames_lat, gen_frame_lat], dim=1).contiguous()
 
                     gen_frames  = decode_latent(decoder, gen_i)
                     real_frames = decode_latent(decoder, real_i)

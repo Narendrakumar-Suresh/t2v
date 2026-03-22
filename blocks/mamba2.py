@@ -41,7 +41,12 @@ class Mamba2Block(nn.Module):
         )
 
         # SSM parameters
-        self.A_log = nn.Parameter(torch.randn(self.inner_dim, state_dim))
+        # Improved A initialization: spread decay rates for better long-range dependency
+        # shape: [inner_dim, state_dim]
+        indices = torch.arange(1, state_dim + 1).float()
+        A_init = torch.log(indices).repeat(self.inner_dim, 1)
+        self.A_log = nn.Parameter(A_init)
+        
         self.B = nn.Linear(self.inner_dim, state_dim, bias=False)
         self.C = nn.Linear(self.inner_dim, state_dim, bias=False)
         self.D = nn.Parameter(torch.ones(self.inner_dim))  # skip connection
@@ -60,43 +65,55 @@ class Mamba2Block(nn.Module):
         """
         Sequential SSM scan.
         x: [B, L, inner_dim]
-
-        h_t = A * h_{t-1} + B * x_t
-        y_t = C * h_t + D * x_t
         """
         B, L, D = x.shape
         N = self.state_dim
 
-        # discretize A
-        A = -torch.exp(self.A_log.float())  # [inner_dim, N] negative = stable
+        # discretize A (always in float32 for stability)
+        # A is [D, N], always negative
+        A = -torch.exp(self.A_log.float())  # [D, N]
 
-        # compute B, C per token
-        Bx = self.B(x)  # [B, L, N]
-        Cx = self.C(x)  # [B, L, N]
+        # compute B, C, dt per token
+        Bx = self.B(x).float()   # [B, L, N]
+        Cx = self.C(x).float()   # [B, L, N]
+        dt = F.softplus(self.dt_proj(x)).float() + 1e-4 # [B, L, D] (add eps for stability)
 
-        # dt (step size)
-        dt = F.softplus(self.dt_proj(x))  # [B, L, inner_dim]
+        # Pre-expand A to [1, D, N] for broadcasting
+        A_expanded = A.unsqueeze(0)
 
-        # scan
-        h = torch.zeros(B, D, N, device=x.device, dtype=x.dtype)
+        # scan in float32
+        h = torch.zeros(B, D, N, device=x.device, dtype=torch.float32)
         ys = []
 
-        for t in range(L):
-            # discretized A: [B, inner_dim, N]
-            dA = torch.exp(dt[:, t, :].unsqueeze(-1) * A.unsqueeze(0))
+        # Optimization: Pull constants out of the loop
+        # x_float is used repeatedly
+        x_float = x.float()
+        D_param = self.D.float()
 
-            # discretized B: [B, inner_dim, N]
-            dB = dt[:, t, :].unsqueeze(-1) * Bx[:, t, :].unsqueeze(1)
+        for t in range(L):
+            # dt_t: [B, D, 1]
+            dt_t = dt[:, t, :].unsqueeze(-1)
+
+            # discretized A: [B, D, N]
+            dA = torch.exp(dt_t * A_expanded)
+
+            # discretized B: [B, D, N]
+            # Use ZOH approximation: dB = dt * B
+            dB = dt_t * Bx[:, t, :].unsqueeze(1)
 
             # state update: h = A*h + B*x
-            h = dA * h + dB * x[:, t, :].unsqueeze(-1)
+            # x_t: [B, D, 1]
+            x_t = x_float[:, t, :].unsqueeze(-1)
+            h = dA * h + dB * x_t
 
             # output: y = C*h + D*x
-            y = (Cx[:, t, :].unsqueeze(1) * h).sum(-1)  # [B, inner_dim]
-            y = y + self.D * x[:, t, :]
+            # C_t: [B, 1, N]
+            C_t = Cx[:, t, :].unsqueeze(1)
+            y = (C_t * h).sum(-1) + D_param * x_float[:, t, :]
             ys.append(y)
 
-        return torch.stack(ys, dim=1)  # [B, L, inner_dim]
+        return torch.stack(ys, dim=1).to(x.dtype)  # [B, L, D]
+
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, L, D = x.shape

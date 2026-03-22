@@ -58,9 +58,16 @@ class VideoLatentDataset(IterableDataset):
 
     def _iter_merged(self):
         ds = load_dataset(
-            "entropyspace/openvid-latents",
+            "joekraper/openvid-latents",
             split="train", streaming=True,
         )
+        # ── Shard for multi-worker safety ─────────────────────────────
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is not None:
+            # Simple interleaving shard
+            ds = ds.shard(num_shards=worker_info.num_workers, 
+                          index=worker_info.id)
+        
         for row in ds:
             latent = self.deserialize(row["serialized_latent"])
             ids, mask = self.tokenize(row["caption"])
@@ -98,32 +105,38 @@ class VideoLatentDataset(IterableDataset):
         if T < 2:
             return None
 
-        # ── Pad/trim to MAX_T ─────────────────────────────────────────
-        if T > MAX_T:
-            latent = latent[:, :MAX_T, :, :]
-        elif T < MAX_T:
-            pad    = torch.zeros(C, MAX_T - T, H, W)
-            latent = torch.cat([latent, pad], dim=1)
-        # latent: [C, MAX_T, H, W]
-
         # ── KEY FIX: split into past context + current frame ──────────
-        past    = latent[:, :-1, :, :]   # [C, MAX_T-1, H, W] → backbone input
-        current = latent[:, -1,  :, :]   # [C, H, W]          → target frame
+        # x0 is the last available frame
+        current = latent[:, -1, :, :]
+        # past is everything before the last frame
+        past = latent[:, :-1, :, :]
 
+        # ── Pad/trim past context to MAX_T-1 ──────────────────────────
+        C_p, T_p, H_p, W_p = past.shape
+        target_T = MAX_T - 1
+        
+        if T_p > target_T:
+            # take the most recent target_T frames
+            past = past[:, -target_T:, :, :]
+            video_mask = torch.ones(target_T)
+        elif T_p < target_T:
+            # pad at the beginning (oldest history)
+            pad = torch.zeros(C_p, target_T - T_p, H_p, W_p)
+            past = torch.cat([pad, past], dim=1)
+            video_mask = torch.cat([torch.zeros(target_T - T_p), torch.ones(T_p)])
+        else:
+            video_mask = torch.ones(target_T)
+        
         # Scaling: latents from VAEs (Cosmos/SD) often need scaling to ~std 1
-        # 1/8.0 is a common factor for these models.
         past    = past / 8.0
         current = current / 8.0
 
-        # x0 = current frame → [C, H, W]
-        # This is the full spatial target for the consistency model
-        x0 = current
-
         return {
-            "latents":    past,        # [C, MAX_T-1, H, W] past context
+            "latents":    past,        # [C, 15, H, W] past context
             "tokens":     tokens,      # [max_text_len]
             "token_mask": token_mask,  # [max_text_len] for masked pooling
-            "x0":         x0,          # [C, H, W] target — full frame
+            "video_mask": video_mask,  # [15] 1=real frame, 0=pad
+            "x0":         current,     # [C, H, W] target — always a real frame
         }
 
 

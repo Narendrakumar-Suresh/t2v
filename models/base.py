@@ -137,30 +137,26 @@ class VideoGenBase(nn.Module):
     def build_short_ctx(self, dim, n_layers, n_heads, dropout):
         raise NotImplementedError
 
-    def inject_noise(self, x: torch.Tensor) -> torch.Tensor:
-        if self.training and self.noise_std > 0:
-            return x + torch.randn_like(x) * self.noise_std
-        return x
-
     def forward(
         self,
-        latents:    torch.Tensor,   # [B, C, T, H, W] PAST frames only
+        latents:    torch.Tensor,   # [B, C, T, H, W] past context
         tokens:     torch.Tensor,   # [B, seq_len]
         x_noisy:    torch.Tensor,   # [B, C, H, W] noisy CURRENT frame
         t:          torch.Tensor,   # [B, 1] noise level
         token_mask: torch.Tensor = None,  # [B, seq_len] padding mask
+        video_mask: torch.Tensor = None,  # [B, T] frame mask
     ) -> torch.Tensor:
 
         B, C, H, W = x_noisy.shape
         P = self.patch_embed.patch_size
 
-        # 1. CALM noise injection into past context
-        latents = self.inject_noise(latents)
-
-        # 2. patchify past frames → token sequence
+        # 1. patchify past frames → token sequence
         x = self.patch_embed(latents)                  # [B, N_past, dim]
+        N_past = x.shape[1]
+        T_past = latents.shape[2]
+        patches_per_frame = N_past // T_past
 
-        # 3. masked text conditioning via AdaLN
+        # 2. masked text conditioning via AdaLN
         text = self.text_embed(tokens, mask=token_mask) # [B, dim]
         x    = self.ada_ln(x, text)                    # adaptive modulation
 
@@ -169,12 +165,24 @@ class VideoGenBase(nn.Module):
         z_long  = self.norm(z_long)
 
         # 5. short backbone — last K tokens
-        k       = min(self.short_k, x.shape[1])
+        k       = min(self.short_k, N_past)
         z_short = self.short_ctx(x[:, -k:, :])         # [B, K, dim]
+        z_short = self.norm(z_short)
 
-        # 6. Globalize past context — mean pool tokens [B, dim]
-        # This provides the "context" for the current frame prediction
-        z = torch.cat([z_long.mean(dim=1), z_short.mean(dim=1)], dim=-1) # [B, dim*2]
+        # 6. Globalize past context — masked mean pool tokens [B, dim]
+        if video_mask is not None:
+            # video_mask is [B, T], expand to [B, T, patches_per_frame] then flatten to [B, N_past]
+            m = video_mask.unsqueeze(-1).expand(-1, -1, patches_per_frame).reshape(B, -1).unsqueeze(-1) # [B, N_past, 1]
+            z_l_pool = (z_long * m).sum(dim=1) / m.sum(dim=1).clamp(min=1)
+            
+            # For short context, we need the last k elements of the mask
+            m_short = m[:, -k:, :]
+            z_s_pool = (z_short * m_short).sum(dim=1) / m_short.sum(dim=1).clamp(min=1)
+        else:
+            z_l_pool = z_long.mean(dim=1)
+            z_s_pool = z_short.mean(dim=1)
+
+        z = torch.cat([z_l_pool, z_s_pool], dim=-1) # [B, dim*2]
 
         # 7. Patchify current noisy frame [B, C, H, W] → [B, N_curr, C*P*P]
         # Using a simpler patchify for the head input/output

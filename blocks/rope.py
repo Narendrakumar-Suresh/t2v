@@ -23,17 +23,18 @@ class RoPE(nn.Module):
         self.sin_cached = None
 
     def forward(self, seq_len: int, device: torch.device):
-        # recompute only if seq_len changed
-        if seq_len != self.seq_len_cached:
+        # recompute only if seq_len changed or device changed
+        if (seq_len != self.seq_len_cached) or (self.cos_cached is None) or (self.cos_cached.device != device):
             self.seq_len_cached = seq_len
             t = torch.arange(seq_len, device=device).float()
-            freqs = torch.outer(t, self.inv_freq)
+            # Ensure inv_freq is on the correct device
+            inv_freq = self.inv_freq.to(device)
+            freqs = torch.outer(t, inv_freq)
             emb = torch.cat([freqs, freqs], dim=-1)
             self.cos_cached = emb.cos()[None, :, None, :]  # [1, N, 1, dim]
             self.sin_cached = emb.sin()[None, :, None, :]  # [1, N, 1, dim]
 
-        # Ensure cached tensors are on the correct device
-        return self.cos_cached.to(device), self.sin_cached.to(device)
+        return self.cos_cached, self.sin_cached
 
 
 def rotate_half(x: torch.Tensor) -> torch.Tensor:

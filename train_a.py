@@ -66,22 +66,26 @@ def get_model(cfg):
 def get_noisy_pair(x0: torch.Tensor):
     t1   = torch.rand(x0.shape[0], 1, device=x0.device)
     t2   = (t1 + 0.05).clamp(0.0, 1.0)
-    # spatial broadcasting for noise level
-    x_t1 = x0 + torch.randn_like(x0) * t1.view(-1, 1, 1, 1)
-    x_t2 = x0 + torch.randn_like(x0) * t2.view(-1, 1, 1, 1)
+    eps  = torch.randn_like(x0)
+    x_t1 = x0 + eps * t1.view(-1, 1, 1, 1)
+    x_t2 = x0 + eps * t2.view(-1, 1, 1, 1)
     return x_t1, x_t2, t1, t2
 
 
-def compute_loss(model, latents, tokens, token_mask, x0, cfg):
+def compute_loss(model, latents, tokens, token_mask, video_mask, x0, cfg):
     """
     Two-part loss:
     1. Consistency: pred at t2 (noisier) ≈ pred at t1 (cleaner, stopgrad)
     2. Reconstruction: pred at t1 ≈ actual x0 (anchor — prevents collapse)
     """
+    # Inject noise into past context ONCE for both model calls
+    if cfg.noise_std > 0:
+        latents = latents + torch.randn_like(latents) * cfg.noise_std
+
     x_t1, x_t2, t1, t2 = get_noisy_pair(x0)
 
-    pred_1 = model(latents, tokens, x_t1, t1, token_mask)
-    pred_2 = model(latents, tokens, x_t2, t2, token_mask)
+    pred_1 = model(latents, tokens, x_t1, t1, token_mask, video_mask)
+    pred_2 = model(latents, tokens, x_t2, t2, token_mask, video_mask)
 
     # consistency loss — noisier should predict same x0 as cleaner
     loss_cons  = F.mse_loss(pred_2, pred_1.detach())
@@ -109,7 +113,7 @@ def save_checkpoint(model, step, cfg):
     print(f"  ✓ {path}")
     if cfg.HF_TOKEN:
         api = HfApi(token=cfg.HF_TOKEN)
-        rid = f"entropyspace/videogen-model-{cfg.model_type}"
+        rid = f"joekraper/videogen-model-{cfg.model_type}"
         api.create_repo(repo_id=rid, repo_type="model", exist_ok=True)
         api.upload_file(path_or_fileobj=path,
                         path_in_repo=f"step_{step:07d}.safetensors",
@@ -157,6 +161,7 @@ def train():
             latents    = batch["latents"].to(device)     # [B, C, T-1, H, W]
             tokens     = batch["tokens"].to(device)      # [B, seq]
             token_mask = batch["token_mask"].to(device)  # [B, seq]
+            video_mask = batch["video_mask"].to(device)  # [B, T]
             x0         = batch["x0"].to(device)          # [B, C] current frame
 
             lr = get_lr(step, cfg)
@@ -165,7 +170,7 @@ def train():
 
             optimizer.zero_grad()
             loss, lc, lr_ = compute_loss(model, latents, tokens,
-                                         token_mask, x0, cfg)
+                                         token_mask, video_mask, x0, cfg)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
             optimizer.step()
@@ -201,11 +206,12 @@ def smoke_test():
     latents    = torch.randn(B, C, 15, H, W)
     tokens     = torch.randint(0, 32128, (B, 32))
     token_mask = torch.ones(B, 32, dtype=torch.long)
+    video_mask = torch.ones(B, 15)
     x0         = torch.randn(B, C, H, W)   # spatial target frame
 
     opt = torch.optim.AdamW(model.parameters())
     opt.zero_grad()
-    loss, lc, lr_ = compute_loss(model, latents, tokens, token_mask, x0, cfg)
+    loss, lc, lr_ = compute_loss(model, latents, tokens, token_mask, video_mask, x0, cfg)
     loss.backward()
     opt.step()
 
